@@ -14,11 +14,10 @@ const GHL_HEADERS = {
   Version: "2021-04-15"
 };
 
-// In-memory store per conversation
 const contactStore = {};
 
 // ============================================================
-// AUTO-DETECT EMAIL FROM ANY MESSAGE
+// DETECT EMAIL
 // ============================================================
 function extractEmail(text) {
   const match = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
@@ -26,118 +25,171 @@ function extractEmail(text) {
 }
 
 // ============================================================
+// CHECK IF NAME IS REAL (not a GHL placeholder)
+// ============================================================
+function isRealName(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  // GHL generates placeholder names like "Visitor Xuxpz"
+  if (lower.includes("visitor")) return false;
+  if (lower.includes("unknown")) return false;
+  if (lower.includes("guest")) return false;
+  if (lower.length < 2) return false;
+  return true;
+}
+
+// ============================================================
+// PRE-CALCULATE REAL DATES (so AI can't hallucinate)
+// ============================================================
+function getRealDates() {
+  const tz = "Asia/Manila";
+  const now = new Date();
+
+  const formatDate = (d) => d.toLocaleDateString("en-US", {
+    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: tz
+  });
+
+  const addDays = (d, n) => {
+    const copy = new Date(d);
+    copy.setDate(copy.getDate() + n);
+    return copy;
+  };
+
+  const toISO = (d, hour) => {
+    const copy = new Date(d);
+    copy.setHours(hour, 0, 0, 0);
+    return copy.toISOString().replace("Z", "+08:00");
+  };
+
+  const today = now;
+  const dates = [];
+  // Generate next 10 weekdays
+  let d = addDays(today, 1);
+  while (dates.length < 10) {
+    const day = d.toLocaleDateString("en-US", { weekday: "short", timeZone: tz });
+    if (day !== "Sat" && day !== "Sun") {
+      dates.push({
+        label: formatDate(d),
+        iso: d.toISOString().split("T")[0]
+      });
+    }
+    d = addDays(d, 1);
+  }
+
+  return {
+    today: formatDate(today),
+    todayISO: today.toISOString().split("T")[0],
+    tomorrow: dates[0].label,
+    tomorrowISO: dates[0].iso,
+    availableDates: dates
+  };
+}
+
+// ============================================================
+// CONVERT NATURAL DATE TO ISO
+// ============================================================
+function parseAppointmentDatetime(datetimeStr) {
+  // Already ISO format
+  if (datetimeStr.includes("T")) return new Date(datetimeStr);
+  // Try parsing natural language
+  return new Date(datetimeStr);
+}
+
+// ============================================================
 // SYSTEM PROMPT
 // ============================================================
 function buildSystemPrompt(knownName, knownEmail) {
   const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric",
-    timeZone: "Asia/Manila"
-  });
   const timeStr = now.toLocaleTimeString("en-US", {
     hour: "2-digit", minute: "2-digit", timeZone: "Asia/Manila"
   });
+  const dates = getRealDates();
 
   const contactStatus = `
-WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER:
+CUSTOMER INFO YOU HAVE:
 - Name: ${knownName || "not collected yet"}
 - Email: ${knownEmail || "not collected yet"}
-${knownName && knownEmail ? "✅ You have both name and email. Do NOT ask for them again." : ""}
-${knownName && !knownEmail ? "✅ You have their name. Casually ask for their email when natural." : ""}
-${!knownName ? "You don't have their name yet. Ask for it casually when appropriate." : ""}
+${knownName && knownEmail ? "✅ You have both. Do NOT ask again." : ""}
+${knownName && !knownEmail ? "✅ Have name. Still need email — ask naturally." : ""}
+${!knownName ? "❌ Need name — ask casually when appropriate." : ""}
 `;
 
-  return `You are Lhyn's friendly chat assistant. 
+  return `You are Lhyn's friendly chat assistant. Warm, human, casual — like texting a knowledgeable friend.
 
-CRITICAL RULE: You MUST always state exact prices. NEVER say "$X", "varies", "depends on requirements", or "we can discuss pricing". Always give the real number immediately when asked.
-
-PRICING CHEAT SHEET — always use these exact numbers, no exceptions:
-- High-Converting Funnels = starts at $897
-- GHL Systems & Automations = starts at $597
-- Custom Web Apps = starts at $1,497
-- Monthly Bookkeeping = starts at $497/month
-- Complete Business Engine = $1,497/month
-- Monthly Retainer = from $350/month
-
-Today is ${dateStr}, ${timeStr} Manila time.
+CRITICAL PRICING RULE — NEVER say "$X". Always use exact numbers:
+- Funnels = $897 | Automations = $597 | Web Apps = $1,497
+- Bookkeeping = $497/month | Complete Engine = $1,497/month | Retainer = $350/month
 
 ${contactStatus}
 
+===== TODAY'S REAL DATE & TIME =====
+Today: ${dates.today}
+Current time: ${timeStr} Manila time
+
+AVAILABLE APPOINTMENT DATES (use ONLY these — never make up dates):
+${dates.availableDates.slice(0, 7).map((d, i) => `- ${d.label} (ISO: ${d.iso})`).join("\n")}
+
 ===== WHO IS LHYN =====
-Lhyn is a GHL Specialist, Bookkeeper, and VA from Metro Manila, PH. Works with US and UK clients. Builds high-converting funnels, GHL automations, custom web apps (React/Next.js), and handles bookkeeping. Interning at AHA Innovations. 30+ GHL systems built. 100% done-for-you.
+GHL Specialist, Bookkeeper, and VA from Metro Manila, PH. Works with US and UK clients.
+Builds funnels, GHL automations, custom web apps (React/Next.js), and bookkeeping.
+Interning at AHA Innovations. 30+ GHL systems built. 100% done-for-you.
+She does GHL AND custom React code — rare combo. Tech + bookkeeping in one.
 
-What makes her different: She does GHL AND custom code (React). Most VAs can't. Also combines tech with bookkeeping — rare combo.
+===== SERVICES & PRICING =====
+1. HIGH-CONVERTING FUNNELS — $897 starting
+   Full GHL funnel. Opt-in to webinar funnels. Custom design, mobile-ready, CRM forms, AI copy, 2 revisions.
 
-===== SERVICES & PRICING (repeat: always give real numbers) =====
-1. HIGH-CONVERTING FUNNELS — starts at $897
-   Full funnel in GHL. Opt-in to webinar funnels. Custom design, mobile-optimized, CRM forms, AI copy, 2 revisions.
+2. GHL SYSTEMS & AUTOMATIONS — $597 starting
+   SMS/email sequences, pipelines, calendar setup, lead tagging, walkthrough.
 
-2. GHL SYSTEMS & AUTOMATIONS — starts at $597
-   SMS/email sequences, pipelines, calendar setup, lead tagging, walkthrough. Biz on autopilot.
+3. CUSTOM WEB APPS — $1,497 starting
+   React/Next.js. Custom UI, data management, Loom walkthrough.
 
-3. CUSTOM WEB APPS — starts at $1,497
-   React/Next.js. Custom UI, data management, Loom walkthrough, responsive.
-
-4. MONTHLY BOOKKEEPING — starts at $497/month
-   QBO or Xero. Up to 2 bank/credit accounts, monthly reconciliation, reports, email support. AP/AR add-on available.
+4. MONTHLY BOOKKEEPING — $497/month starting
+   QBO or Xero. Up to 2 bank/credit accounts, reconciliation, reports. AP/AR add-on available.
 
 5. COMPLETE BUSINESS ENGINE — $1,497/month
-   GHL tech + full bookkeeping combined. Weekly check-ins, priority Slack, funnel tweaks.
+   GHL tech + full bookkeeping. Weekly check-ins, priority Slack, funnel tweaks.
 
-RETAINER — from $350/month
-   Updates, automations, revisions, priority access.
+RETAINER — from $350/month (updates, automations, revisions)
 
-All prices in USD. Transparent. No surprises. Discovery call is FREE.
+All USD. Discovery call is FREE.
 
 ===== PORTFOLIO =====
-- Webinar funnel for JC de las Alas (online course platform)
-- AI-Powered Landing Pages Training funnel
-- Reyes HVAC & Plumbing — full sales funnel
-- Lead magnet GHL funnels
-- Custom React/Vercel web apps
+Webinar funnel (JC de las Alas), AI Landing Pages Training, Reyes HVAC & Plumbing funnel, lead magnet funnels, custom React/Vercel apps.
 
 ===== CONTACT =====
-Email: hello@lhynworks.com | Facebook: fb.com/lhynworks
-Location: Metro Manila, PH — available for US clients via Zoom + async
+hello@lhynworks.com | fb.com/lhynworks | Metro Manila PH — Zoom + async for US clients
 
-===== CONVERSATION FLOW — FOLLOW THIS EXACTLY =====
-
-STEP 1 — Answer questions helpfully. Always give real prices from the cheat sheet above. Be warm and human.
-
-STEP 2 — When it feels natural, ask for their name casually:
-  "By the way, I didn't catch your name! What's yours? 😊"
-
-STEP 3 — After getting their name, use it naturally. A little later ask for email:
-  "And what's the best email to reach you at, [Name]?"
-
-STEP 4 — Once you have BOTH name and email, include this silently in your reply (invisible to user):
+===== CONVERSATION FLOW =====
+STEP 1 — Answer questions. Give EXACT prices. Be warm and short.
+STEP 2 — Ask for name casually when natural: "By the way, what's your name? 😊"
+STEP 3 — After name, ask for email: "What's the best email for you, [Name]?"
+STEP 4 — Once you have BOTH, include silently (user won't see):
   [CONTACT:{"name":"FULL_NAME","email":"EMAIL"}]
-
-STEP 5 — Do NOT push for a call. Let the customer finish asking all their questions first. Only offer to book when THEY seem ready or ask about next steps.
-
-STEP 6 — When they agree to book and give a date/time:
-  - Use today's real date (${dateStr}) to calculate the exact date
-  - "Tomorrow" = tomorrow's actual date
-  - Always state the real full date: e.g. "Thursday, April 3 at 10am"
-  - Include this silently:
+STEP 5 — Don't push for a call. Wait until they're ready or ask about next steps.
+STEP 6 — When they want to book:
+  - Ask what date and time works for them
+  - Pick from the AVAILABLE APPOINTMENT DATES list above ONLY
+  - NEVER invent a date not in that list
+  - Convert their choice to exact ISO format: YYYY-MM-DDTHH:mm:ss
+  - Include silently:
   [APPOINTMENT:{"name":"FULL_NAME","email":"EMAIL","datetime":"YYYY-MM-DDTHH:mm:ss","notes":"Free discovery call - Lhyn Works"}]
+STEP 7 — Confirm with real date and time. Example: "Perfect! You're booked for Thursday, April 3 at 10:00 AM Manila time 🎉"
 
-STEP 7 — Confirm the booking with the exact real date and time clearly.
-
-===== TONE RULES =====
-- Warm, human, friendly — like texting a knowledgeable friend
-- Short replies — 2 to 4 sentences max unless explaining something complex
-- Use the customer's name naturally once you know it
-- Light emojis occasionally — not every message
-- NEVER say "Certainly!", "Of course!", "Absolutely!" — sounds robotic
-- NEVER say "$X" or "varies" — always give the real price
-- NEVER say you don't have access to previous chats — you DO have the full history
-- If you don't know something: "Let me have Lhyn check on that! You can also reach her at hello@lhynworks.com 😊"
-- Available for calls: Mon–Fri, 9AM–6PM Manila time (flexible for US clients)`;
+===== TONE =====
+- 2–4 sentences max per reply
+- Use their name once you know it
+- Emojis occasionally
+- NEVER: "Certainly!", "Of course!", "Absolutely!"
+- NEVER: "$X" or "varies"
+- NEVER: "I don't have access to previous chats"
+- Unknown questions → "Let me have Lhyn check! Reach her at hello@lhynworks.com 😊"
+- Call hours: Mon–Fri 9AM–6PM Manila (flexible for US clients)`;
 }
 
 // ============================================================
-// GET CONVERSATION HISTORY FROM GHL
+// GET CONVERSATION HISTORY
 // ============================================================
 async function getConversationHistory(conversationId) {
   try {
@@ -154,29 +206,32 @@ async function getConversationHistory(conversationId) {
       }))
       .filter(m => m.content.trim());
   } catch (err) {
-    console.error("History fetch error:", err.response?.data || err.message);
+    console.error("History error:", err.response?.data || err.message);
     return [];
   }
 }
 
 // ============================================================
-// SAVE CONTACT TO GHL CRM
+// SAVE CONTACT
 // ============================================================
 async function saveContact(name, email) {
   try {
     const parts = name.trim().split(" ");
     const firstName = parts[0];
     const lastName = parts.slice(1).join(" ") || "";
-    const res = await axios.post(
-      "https://services.leadconnectorhq.com/contacts/",
-      { locationId: GHL_LOCATION_ID, firstName, lastName, email },
-      { headers: GHL_HEADERS }
-    );
-    const id = res.data.contact?.id;
-    console.log(`✅ Contact saved: ${name} / ${email} / ID: ${id}`);
-    return id;
-  } catch (err) {
+
+    // Try create first
     try {
+      const res = await axios.post(
+        "https://services.leadconnectorhq.com/contacts/",
+        { locationId: GHL_LOCATION_ID, firstName, lastName, email },
+        { headers: GHL_HEADERS }
+      );
+      const id = res.data.contact?.id;
+      console.log(`✅ Contact created: ${name} / ${email} / ${id}`);
+      return id;
+    } catch (createErr) {
+      // If already exists, find and update
       const search = await axios.get(
         `https://services.leadconnectorhq.com/contacts/?locationId=${GHL_LOCATION_ID}&email=${encodeURIComponent(email)}`,
         { headers: GHL_HEADERS }
@@ -185,18 +240,15 @@ async function saveContact(name, email) {
       if (existing) {
         await axios.put(
           `https://services.leadconnectorhq.com/contacts/${existing.id}`,
-          {
-            firstName: name.split(" ")[0],
-            lastName: name.split(" ").slice(1).join(" ") || ""
-          },
+          { firstName, lastName },
           { headers: GHL_HEADERS }
         );
-        console.log(`✅ Existing contact updated: ${existing.id}`);
+        console.log(`✅ Contact updated: ${existing.id}`);
         return existing.id;
       }
-    } catch (e) {
-      console.error("Contact lookup error:", e.response?.data || e.message);
     }
+  } catch (err) {
+    console.error("❌ saveContact error:", err.response?.data || err.message);
   }
 }
 
@@ -207,11 +259,15 @@ async function bookAppointment(name, email, datetime, notes) {
   try {
     const contactId = await saveContact(name, email);
     if (!contactId) {
-      console.error("❌ No contactId — cannot book");
-      return;
+      console.error("❌ No contactId");
+      return false;
     }
 
-    const startTime = new Date(datetime);
+    const startTime = parseAppointmentDatetime(datetime);
+    if (isNaN(startTime.getTime())) {
+      console.error("❌ Invalid datetime:", datetime);
+      return false;
+    }
     const endTime = new Date(startTime.getTime() + 30 * 60 * 1000);
 
     const payload = {
@@ -226,15 +282,19 @@ async function bookAppointment(name, email, datetime, notes) {
       notes: notes || "Free 30-min discovery call"
     };
 
-    console.log("📅 Booking:", JSON.stringify(payload));
+    console.log("📅 Booking payload:", JSON.stringify(payload, null, 2));
+
     const res = await axios.post(
       "https://services.leadconnectorhq.com/calendars/events/appointments",
       payload,
       { headers: GHL_HEADERS }
     );
-    console.log(`✅ Appointment booked! ID: ${res.data.id}`);
+
+    console.log(`✅ BOOKED! Response:`, JSON.stringify(res.data, null, 2));
+    return true;
   } catch (err) {
-    console.error("❌ Booking error:", JSON.stringify(err.response?.data) || err.message);
+    console.error("❌ Booking error:", JSON.stringify(err.response?.data, null, 2) || err.message);
+    return false;
   }
 }
 
@@ -259,7 +319,6 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
 
-  // Init store for this conversation
   if (!contactStore[conversationId]) {
     contactStore[conversationId] = { name: null, email: null, saved: false };
   }
@@ -269,16 +328,16 @@ app.post("/webhook", async (req, res) => {
   const detectedEmail = extractEmail(message);
   if (detectedEmail && !store.email) {
     store.email = detectedEmail;
-    console.log(`📧 Email auto-detected: ${detectedEmail}`);
+    console.log(`📧 Email detected: ${detectedEmail}`);
   }
 
-  // Use GHL contact_name if we don't have a name yet
-  if (contact_name && !store.name && contact_name !== "undefined") {
+  // Only use GHL contact_name if it looks like a real person's name
+  if (!store.name && isRealName(contact_name)) {
     store.name = contact_name;
-    console.log(`👤 Name from GHL: ${contact_name}`);
+    console.log(`👤 Real name from GHL: ${contact_name}`);
   }
 
-  // Save to CRM immediately when we have both
+  // Save immediately if we have both
   if (store.name && store.email && !store.saved) {
     await saveContact(store.name, store.email);
     store.saved = true;
@@ -287,7 +346,7 @@ app.post("/webhook", async (req, res) => {
   try {
     const history = await getConversationHistory(conversationId);
 
-    // Scan history for any emails we missed
+    // Scan history for missed emails
     if (!store.email) {
       for (const msg of history) {
         const found = extractEmail(msg.content);
@@ -299,6 +358,8 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
+    console.log(`🗂️ Store for ${conversationId}:`, store);
+
     const groqRes = await axios.post(
       "https://api.groq.com/openai/v1/chat/completions",
       {
@@ -309,7 +370,7 @@ app.post("/webhook", async (req, res) => {
           { role: "user", content: message }
         ],
         max_tokens: 400,
-        temperature: 0.75
+        temperature: 0.7
       },
       {
         headers: {
@@ -322,34 +383,36 @@ app.post("/webhook", async (req, res) => {
     let aiReply = groqRes.data.choices[0].message.content;
     console.log("🤖 Raw reply:", aiReply);
 
-    // Handle CONTACT tag from AI
-    const contactMatch = aiReply.match(/\[CONTACT:({.*?})\]/s);
+    // Handle CONTACT tag
+    const contactMatch = aiReply.match(/\[CONTACT:(\{.*?\})\]/s);
     if (contactMatch) {
       try {
         const parsed = JSON.parse(contactMatch[1]);
-        if (parsed.name && !store.name) store.name = parsed.name;
+        if (isRealName(parsed.name) && !store.name) store.name = parsed.name;
         if (parsed.email && !store.email) store.email = parsed.email;
         if (store.name && store.email && !store.saved) {
           await saveContact(store.name, store.email);
           store.saved = true;
         }
-      } catch (e) { console.error("Contact parse error", e); }
+        console.log(`📋 CONTACT tag processed: ${store.name} / ${store.email}`);
+      } catch (e) { console.error("Contact parse error:", e); }
       aiReply = aiReply.replace(contactMatch[0], "").trim();
     }
 
-    // Handle APPOINTMENT tag from AI
-    const appointmentMatch = aiReply.match(/\[APPOINTMENT:({.*?})\]/s);
+    // Handle APPOINTMENT tag
+    const appointmentMatch = aiReply.match(/\[APPOINTMENT:(\{.*?\})\]/s);
     if (appointmentMatch) {
       try {
         const appt = JSON.parse(appointmentMatch[1]);
-        const name = appt.name || store.name;
+        const name = (isRealName(appt.name) ? appt.name : null) || store.name;
         const email = appt.email || store.email;
-        if (name && email) {
+        console.log(`📅 APPOINTMENT tag: ${name} / ${email} / ${appt.datetime}`);
+        if (name && email && appt.datetime) {
           await bookAppointment(name, email, appt.datetime, appt.notes);
         } else {
-          console.error("❌ Missing name or email for appointment");
+          console.error("❌ Missing data for appointment:", { name, email, datetime: appt.datetime });
         }
-      } catch (e) { console.error("Appointment parse error", e); }
+      } catch (e) { console.error("Appointment parse error:", e); }
       aiReply = aiReply.replace(appointmentMatch[0], "").trim();
     }
 
@@ -357,7 +420,7 @@ app.post("/webhook", async (req, res) => {
     res.json({ success: true });
 
   } catch (err) {
-    console.error(err.response?.data || err.message);
+    console.error("Webhook error:", err.response?.data || err.message);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
